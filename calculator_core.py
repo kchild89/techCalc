@@ -5,12 +5,17 @@ import hashlib
 import ipaddress
 import math
 import operator
+from functools import lru_cache
 from decimal import Decimal, InvalidOperation, localcontext
 from urllib.parse import quote, unquote
 
 
 class CalculationError(ValueError):
-    """A readable error suitable for displaying in the interface."""
+    """A readable error with an optional character offset for the editor."""
+
+    def __init__(self, message, position=None):
+        super().__init__(message)
+        self.position = position
 
 
 def _bounded(value):
@@ -46,26 +51,34 @@ BINARY = {
 UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg, ast.Invert: operator.invert}
 
 
-def evaluate(source, ans=0):
+@lru_cache(maxsize=128)
+def _parse_expression(source):
+    tree = ast.parse(source, mode="eval")
+    if sum(1 for _ in ast.walk(tree)) > 160:
+        raise CalculationError("This expression has too many operations.")
+    return tree
+
+
+def evaluate(source, ans=0, variables=None):
     """Evaluate an allowlisted arithmetic AST; never execute Python source."""
+    leading_space = len(source) - len(source.lstrip())
     source = source.strip()
     if not source:
         raise CalculationError("Enter an expression to begin.")
     if len(source) > 512:
         raise CalculationError("Keep expressions under 512 characters.")
     try:
-        tree = ast.parse(source, mode="eval")
-        if sum(1 for _ in ast.walk(tree)) > 160:
-            raise CalculationError("This expression has too many operations.")
+        tree = _parse_expression(source)
 
         def visit(node):
             if isinstance(node, ast.Constant) and type(node.value) in (int, float):
                 return _bounded(node.value)
             if isinstance(node, ast.Name):
-                constants = {"pi": math.pi, "e": math.e, "tau": math.tau, "ans": ans}
+                constants = dict(variables or {})
+                constants.update({"pi": math.pi, "e": math.e, "tau": math.tau, "ans": ans})
                 if node.id in constants:
                     return _bounded(constants[node.id])
-                raise CalculationError("Unknown name: " + node.id)
+                raise CalculationError("Unknown name: " + node.id, node.col_offset)
             if isinstance(node, ast.UnaryOp) and type(node.op) in UNARY:
                 return _bounded(UNARY[type(node.op)](visit(node.operand)))
             if isinstance(node, ast.BinOp):
@@ -92,12 +105,15 @@ def evaluate(source, ans=0):
             raise CalculationError("Use numbers, arithmetic operators, and supported functions.")
 
         return visit(tree.body)
-    except CalculationError:
+    except CalculationError as exc:
+        if exc.position is not None:
+            exc.position += leading_space
         raise
     except ZeroDivisionError:
         raise CalculationError("Cannot divide by zero.") from None
-    except SyntaxError:
-        raise CalculationError("Check the expression and matching parentheses.") from None
+    except SyntaxError as exc:
+        raise CalculationError("Check the expression and matching parentheses.",
+                               leading_space + max(0, (exc.offset or 1) - 1)) from None
     except (TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise CalculationError("Invalid operation: " + str(exc)) from None
 
