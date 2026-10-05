@@ -1,7 +1,10 @@
-.venv-build/
+.venv*/
 build/
 dist/
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 *.spec
 .test-data*/
+.DS_Store
+.pytest_cache/
